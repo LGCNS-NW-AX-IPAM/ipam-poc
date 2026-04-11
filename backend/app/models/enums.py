@@ -1,14 +1,13 @@
 from enum import Enum
 
 class ReclaimStatus(str, Enum):
-    READY = "Ready"
-    IN_PROGRESS = "In-Progress"
-    RELEASED = "Released"
-    FAILED = "Failed"
+    READY = "READY"
+    IN_PROGRESS = "IN-PROGRESS"
+    DONE = "DONE"
 
 class DetailStatus(str, Enum):
-    READY = "Ready"
-    IN_PROGRESS = "In-Progress"
+    READY = "READY"
+    IN_PROGRESS = "IN-PROGRESS"
     DHCP_REQUESTED = "DHCP_REQUESTED"
     DHCP_SUCCESS = "DHCP_SUCCESS"
     DHCP_FAILED = "DHCP_FAILED"

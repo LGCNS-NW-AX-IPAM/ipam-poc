@@ -12,8 +12,8 @@ from langgraph.graph import StateGraph, END
 from app.client.ntoss_client import NtossClient
 from app.core.database import SessionLocal
 from app.models.entities import IpReclaimCandidate
-from backend.app.repositories.reclaim_job.reclaim_repository import ReclaimRepository
-from backend.app.repositories.reclaim_job.job_repository import JobRepository
+from app.repositories.reclaim_job.reclaim_repository import ReclaimRepository
+from app.repositories.reclaim_job.job_repository import JobRepository
 
 # 💡 공유 상태 구조 (router.py와 맞추어야 합니다)
 class AgentState(TypedDict):
