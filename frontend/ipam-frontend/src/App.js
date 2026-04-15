@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import axios from 'axios';
-import { Send, User, Bot, Loader2, CheckCircle2 } from 'lucide-react';
+import { Send, User, Bot, Loader2, CheckCircle2, Paperclip } from 'lucide-react';
 
 function App() {
   const [input, setInput] = useState('');
@@ -11,9 +11,11 @@ function App() {
   // 💡 [핵심] 에이전트가 추출한 데이터와 설정을 프론트에서 들고 있어야 합니다 (Stateless 대응)
   const [selectedIps, setSelectedIps] = useState([]); 
   const [maxPerTeam, setMaxPerTeam] = useState(4);
+  const [selectedFileName, setSelectedFileName] = useState('');
   
   const [isLoading, setIsLoading] = useState(false);
   const scrollRef = useRef(null);
+  const fileInputRef = useRef(null);
 
   // 새 메시지가 추가될 때마다 하단으로 스크롤
   useEffect(() => {
@@ -31,6 +33,7 @@ function App() {
     
     setMessages(updatedMessages);
     setInput('');
+
     setIsLoading(true);
 
     try {
@@ -68,6 +71,41 @@ function App() {
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const executeCandidateUpload = async () => {
+    const file = fileInputRef.current?.files?.[0];
+    if (!file || isLoading) return;
+    setIsLoading(true);
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('history', JSON.stringify(messages));
+      const response = await axios.post('http://localhost:8000/api/v1/candidate/upload', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' }
+      });
+      const { content, selected_ips } = response.data;
+      if (selected_ips) setSelectedIps(selected_ips);
+      setMessages((prev) => [...prev, { role: 'assistant', content: content || '업로드 처리가 완료되었습니다.' }]);
+    } catch (error) {
+      console.error('Error calling candidate upload API:', error);
+      setMessages((prev) => [...prev, { role: 'assistant', content: '엑셀 업로드 처리 중 오류가 발생했습니다.' }]);
+    } finally {
+      setIsLoading(false);
+      setSelectedFileName('');
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  const handleAttachClick = () => {
+    if (!isLoading) fileInputRef.current?.click();
+  };
+
+  const handleFileSelected = () => {
+    const file = fileInputRef.current?.files?.[0];
+    if (!file) return;
+    setSelectedFileName(file.name);
+    executeCandidateUpload();
   };
 
   return (
@@ -126,13 +164,30 @@ function App() {
       <footer className="p-6 md:p-10 border-t border-gray-600 bg-[#343541] shadow-2xl">
         <form onSubmit={handleSend} className="max-w-4xl mx-auto relative group">
           <input
+            ref={fileInputRef}
+            type="file"
+            accept=".xlsx,.xlsm,.xltx,.xltm"
+            className="hidden"
+            onChange={handleFileSelected}
+            disabled={isLoading}
+          />
+          <input
             type="text"
-            className="w-full p-4 pr-14 rounded-xl bg-[#40414f] border border-gray-600 focus:outline-none focus:border-[#10a37f] focus:ring-1 focus:ring-[#10a37f] text-white placeholder-gray-500 shadow-inner transition-all"
+            className="w-full p-4 pl-14 pr-14 rounded-xl bg-[#40414f] border border-gray-600 focus:outline-none focus:border-[#10a37f] focus:ring-1 focus:ring-[#10a37f] text-white placeholder-gray-500 shadow-inner transition-all"
             placeholder="예: 'IP 회수 대상 알려줘', '오늘 IP 회수작업 진행 현황 알려줘'"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             disabled={isLoading}
           />
+          <button
+            type="button"
+            onClick={handleAttachClick}
+            disabled={isLoading}
+            className="absolute left-3 top-1/2 -translate-y-1/2 p-2 rounded-lg text-gray-300 hover:text-white hover:bg-gray-700 disabled:text-gray-500 transition-colors"
+            title="엑셀 업로드"
+          >
+            <Paperclip size={18} />
+          </button>
           <button
             type="submit"
             className="absolute right-3 top-1/2 -translate-y-1/2 p-2 rounded-lg text-white bg-[#10a37f] hover:bg-[#1a7f64] disabled:bg-gray-600 disabled:text-gray-400 transition-colors shadow-md"
@@ -141,6 +196,11 @@ function App() {
             <Send size={20} />
           </button>
         </form>
+        {selectedFileName && (
+          <div className="max-w-4xl mx-auto mt-2 text-xs text-gray-400 truncate">
+            첨부됨: {selectedFileName}
+          </div>
+        )}
         <div className="flex justify-center gap-4 mt-4">
            <p className="text-[11px] text-gray-500 uppercase tracking-widest">
              LG CNS NW AX IPAM PoC Environment
