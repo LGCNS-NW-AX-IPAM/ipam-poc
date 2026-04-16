@@ -6,11 +6,15 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 from app.llm.router import master_graph  # 💡 이제 라우터의 그래프를 가져옵니다.
-from app.llm.candidate_agent import CandidateAgent
+from app.services.candidate_service import CandidateService
 from app.core.database import get_db
 from pydantic import BaseModel
 
 router = APIRouter()
+
+def _default_batch_id() -> str:
+    now = datetime.now()
+    return f"BATCH-{now.year:04d}-{now.month:02d}-{now.day}"
 
 class ChatRequest(BaseModel):
     history: List[dict]
@@ -62,36 +66,36 @@ async def upload_candidates_by_context(
         parsed_history = []
 
     content = await file.read()
-    agent = CandidateAgent()
-    mode = agent.infer_upload_mode_from_history(parsed_history)
+    service = CandidateService()
+    mode = service.infer_upload_mode_from_history(parsed_history)
 
     if mode == "finalize":
-        batch_id = extraction_batch_id.strip() or f"FINAL-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        batch_id = extraction_batch_id.strip() or _default_batch_id()
         try:
-            result = agent.finalize_candidates_from_excel(
+            result = service.finalize_candidates_from_excel(
                 db=db,
                 file_bytes=content,
                 extraction_batch_id=batch_id,
                 usage_threshold=usage_threshold,
                 default_owner_email=default_owner_email,
             )
-            message = agent.build_finalize_response_message(result)
+            message = service.build_finalize_response_message(result)
             return {**result, "content": message, "mode": "finalize"}
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"후보 확정 중 오류가 발생했습니다: {str(e)}")
 
-    batch_id = extraction_batch_id.strip() or f"BATCH-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    batch_id = extraction_batch_id.strip() or _default_batch_id()
     try:
-        result = agent.extract_candidates_from_excel(
+        result = service.extract_candidates_from_excel(
             db=db,
             file_bytes=content,
             extraction_batch_id=batch_id,
             usage_threshold=usage_threshold,
             default_owner_email=default_owner_email,
         )
-        message = agent.build_extract_response_message(result)
+        message = service.build_extract_response_message(result)
         return {**result, "content": message, "mode": "extract"}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
