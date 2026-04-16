@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import END, StateGraph
+from app.services.candidate_service import CandidateService
 
 
 class AgentState(TypedDict):
@@ -23,6 +24,8 @@ class CandidateAgent:
             temperature=0,
             google_api_key=os.getenv("GOOGLE_API_KEY"),
         )
+        self.candidate_service = CandidateService()
+        self.demo_review_recipient = os.getenv("CANDIDATE_DEMO_REVIEW_EMAIL", "").strip()
 
     def _convert_to_messages(self, messages: List[Union[dict, BaseMessage]]) -> List[BaseMessage]:
         converted: List[BaseMessage] = []
@@ -103,7 +106,33 @@ class CandidateAgent:
             selected_ips = state.get("selected_ips", [])
             if not selected_ips:
                 return {"messages": [AIMessage(content="검토 메일을 보낼 후보 목록이 없습니다. 먼저 엑셀 업로드를 진행해 주세요.")]}
-            return {"messages": [AIMessage(content="담당자 검토 요청 Gmail 발송을 진행합니다.")]}
+            mail_result = self.candidate_service.send_review_mails(
+                selected_ips=selected_ips,
+                override_recipients=[self.demo_review_recipient] if self.demo_review_recipient else None,
+            )
+            if mail_result.get("failed"):
+                failed_reasons = mail_result.get("failed_reasons", {})
+                return {
+                    "messages": [
+                        AIMessage(
+                            content=(
+                                f"검토 요청 메일 발송 중 일부 실패가 발생했습니다. "
+                                f"성공 {mail_result.get('sent_count', 0)}건, 실패 {mail_result.get('failed')}, "
+                                f"사유 {failed_reasons}"
+                            )
+                        )
+                    ]
+                }
+            return {
+                "messages": [
+                    AIMessage(
+                        content=(
+                            f"검토 요청 메일 발송이 완료되었습니다. "
+                            f"수신자: {self.demo_review_recipient or '자동 계산 대상'}, 발송 건수: {mail_result.get('sent_count', 0)}건"
+                        )
+                    )
+                ]
+            }
 
         if action == "GUIDE_FINALIZE_UPLOAD":
             return {

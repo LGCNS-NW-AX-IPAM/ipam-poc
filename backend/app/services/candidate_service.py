@@ -6,7 +6,7 @@ from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from io import BytesIO
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
@@ -160,22 +160,31 @@ class CandidateService:
         wb.save(bio)
         return bio.getvalue()
 
-    def send_review_mails(self, selected_ips: List[dict]) -> Dict:
+    def send_review_mails(self, selected_ips: List[dict], override_recipients: Optional[List[str]] = None) -> Dict:
         print("\n🚀 [FUNC: send_review_mails(CandidateService)]")
         if not selected_ips:
+            print("⚠️ selected_ips is empty")
             return {"sent_count": 0, "failed": []}
 
-        team_email_map = self._load_team_email_map()
-        default_email = os.getenv("CANDIDATE_DEFAULT_OWNER_EMAIL", "no-reply@ipam.local")
-        recipients = sorted(
-            {
-                team_email_map.get(item.get("owner_team", "").strip()) or item.get("owner_email") or default_email
-                for item in selected_ips
-                if item.get("owner_team") or item.get("owner_email")
-            }
-        )
+        if override_recipients:
+            recipients = sorted({str(email).strip() for email in override_recipients if str(email).strip()})
+        else:
+            team_email_map = self._load_team_email_map()
+            default_email = os.getenv("CANDIDATE_DEFAULT_OWNER_EMAIL", "no-reply@ipam.local")
+            recipients = sorted(
+                {
+                    team_email_map.get(item.get("owner_team", "").strip()) or item.get("owner_email") or default_email
+                    for item in selected_ips
+                    if item.get("owner_team") or item.get("owner_email")
+                }
+            )
+        print(f"📨 recipients={recipients}")
         gmail_user = os.getenv("GMAIL_USER")
-        gmail_password = os.getenv("GMAIL_APP_PASSWORD")
+        raw_gmail_password = os.getenv("GMAIL_APP_PASSWORD", "")
+        # App Password는 종종 "abcd efgh ijkl mnop" 형태로 저장되어 공백 제거가 필요합니다.
+        gmail_password = raw_gmail_password.replace(" ", "").strip()
+        print(f"🔐 gmail_user={'set' if gmail_user else 'missing'}")
+        print(f"🔐 gmail_app_password={'set' if gmail_password else 'missing'} (len={len(gmail_password)})")
         subject = "[IPAM] IP 회수 후보 검토 요청"
 
         body_lines = [
@@ -190,13 +199,20 @@ class CandidateService:
         body_lines.append("검토 후 회신 부탁드립니다.")
         body = "\n".join(body_lines)
 
+        if not recipients:
+            print("⚠️ recipients is empty after resolution")
+            return {"sent_count": 0, "failed": ["NO_RECIPIENT"]}
+
         if not gmail_user or not gmail_password:
+            print("⚠️ gmail credentials missing -> mock success")
             return {"sent_count": len(recipients), "failed": []}
 
         xlsx_bytes = self._build_review_excel_bytes(selected_ips)
         attach_name = "ip_reclaim_candidates_review.xlsx"
         failed = []
+        failed_reasons: Dict[str, str] = {}
         for to_email in recipients:
+            print(f"➡️ start send to={to_email}")
             msg = MIMEMultipart()
             msg["Subject"] = subject
             msg["From"] = gmail_user
@@ -209,12 +225,25 @@ class CandidateService:
             part.add_header("Content-Disposition", "attachment", filename=attach_name)
             msg.attach(part)
             try:
+                print("   - connect smtp.gmail.com:465")
                 with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+                    print("   - login")
                     smtp.login(gmail_user, gmail_password)
+                    print("   - send_message")
                     smtp.send_message(msg)
+                print(f"✅ sent to={to_email}")
             except Exception:
+                import traceback
+                err = traceback.format_exc()
+                print(f"❌ send failed to={to_email}\n{err}")
                 failed.append(to_email)
-        return {"sent_count": len(recipients) - len(failed), "failed": failed}
+                failed_reasons[to_email] = err
+        print(f"📊 mail result sent={len(recipients) - len(failed)} failed={len(failed)}")
+        return {
+            "sent_count": len(recipients) - len(failed),
+            "failed": failed,
+            "failed_reasons": failed_reasons,
+        }
 
     @staticmethod
     def _normalize_header(value) -> str:
