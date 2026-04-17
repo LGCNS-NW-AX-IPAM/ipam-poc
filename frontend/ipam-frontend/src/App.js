@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import axios from 'axios';
-import { Send, User, Bot, Loader2, CheckCircle2, Paperclip } from 'lucide-react';
+import { Send, User, Bot, Loader2, CheckCircle2, Paperclip, Download } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
@@ -15,7 +15,7 @@ function App() {
   const [excludedFilters, setExcludedFilters] = useState([]);
   const [isConfirmed, setIsConfirmed] = useState(false);
   const [selectedFileName, setSelectedFileName] = useState('');
-  
+
   const [isLoading, setIsLoading] = useState(false);
   const scrollRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -25,6 +25,27 @@ function App() {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages]);
+
+  const chatHistoryPayload = (msgs) => msgs.map(({ role, content }) => ({ role, content }));
+
+  const downloadReviewExcel = (base64, fileName) => {
+    try {
+      const bin = atob(base64);
+      const arr = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i += 1) arr[i] = bin.charCodeAt(i);
+      const blob = new Blob([arr], {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = fileName || 'ip_reclaim_candidates_review.xlsx';
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('다운로드 실패', err);
+    }
+  };
 
   const handleSend = async (e) => {
     e.preventDefault();
@@ -40,7 +61,7 @@ function App() {
 
     try {
       const response = await axios.post('http://localhost:8000/api/v1/chat', {
-        history: updatedMessages,
+        history: chatHistoryPayload(updatedMessages),
         selected_ips: selectedIps,
         max_per_team: maxPerTeam,
         excluded_filters: excludedFilters,
@@ -78,13 +99,25 @@ function App() {
     try {
       const formData = new FormData();
       formData.append('file', file);
-      formData.append('history', JSON.stringify(messages));
+      formData.append('history', JSON.stringify(chatHistoryPayload(messages)));
       const response = await axios.post('http://localhost:8000/api/v1/candidate/upload', formData, {
         headers: { 'Content-Type': 'multipart/form-data' }
       });
-      const { content, selected_ips } = response.data;
+      const { content, selected_ips, mode, review_excel_base64, batch_id: batchId } = response.data;
       if (selected_ips) setSelectedIps(selected_ips);
-      setMessages((prev) => [...prev, { role: 'assistant', content: content || '업로드 처리가 완료되었습니다.' }]);
+      const safeBatch = (batchId || 'review').replace(/[^\w.-]+/g, '_');
+      const reviewDl =
+        mode === 'extract' && review_excel_base64
+          ? { base64: review_excel_base64, fileName: `ip_reclaim_candidates_${safeBatch}.xlsx` }
+          : null;
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: 'assistant',
+          content: content || '업로드 처리가 완료되었습니다.',
+          ...(reviewDl ? { reviewExcelDownload: reviewDl } : {}),
+        },
+      ]);
     } catch (error) {
       console.error('Error calling candidate upload API:', error);
       setMessages((prev) => [...prev, { role: 'assistant', content: '엑셀 업로드 처리 중 오류가 발생했습니다.' }]);
@@ -167,6 +200,23 @@ function App() {
                 {msg.content.includes("확정되었습니다") && (
                   <div className="mt-3 flex items-center gap-2 text-green-400 text-sm font-bold border-t border-gray-600 pt-3">
                     <CheckCircle2 size={16} /> 작업 등록 완료 (NTOSS 연동됨)
+                  </div>
+                )}
+                {msg.role === 'assistant' && msg.reviewExcelDownload && (
+                  <div className="mt-3 pt-3 border-t border-gray-600">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        downloadReviewExcel(
+                          msg.reviewExcelDownload.base64,
+                          msg.reviewExcelDownload.fileName
+                        )
+                      }
+                      className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white text-sm font-medium shadow-md transition-colors"
+                    >
+                      <Download size={16} />
+                      회수 후보 엑셀 다운로드
+                    </button>
                   </div>
                 )}
               </div>

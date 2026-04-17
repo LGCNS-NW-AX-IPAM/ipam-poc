@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import re
@@ -19,6 +20,8 @@ from app.repositories.candidate.candidate_repository import CandidateRepository
 
 
 class CandidateService:
+    RECLAIM_REASON_COL = "회수 사유"
+
     REQUIRED_HEADERS = [
         "DHCP Server IP",
         "IP블록",
@@ -138,15 +141,19 @@ class CandidateService:
     def _build_review_excel_bytes(selected_ips: List[dict]) -> bytes:
         wb = Workbook()
         ws = wb.active
+        reason_col = CandidateService.RECLAIM_REASON_COL
         with_snap = [x for x in selected_ips if x.get("excel_row")]
         if with_snap:
             hdrs = list(with_snap[0]["excel_row"].keys())
+            if reason_col not in hdrs:
+                hdrs = hdrs + [reason_col]
             ws.append(hdrs)
             for item in with_snap:
-                er = item["excel_row"]
+                er = dict(item["excel_row"])
+                er[reason_col] = str(item.get("decision_reason", "") or "")
                 ws.append([er.get(h) for h in hdrs])
         else:
-            ws.append(["네트워크 ID", "IP블록", "인프라팀", "담당 이메일"])
+            ws.append(["네트워크 ID", "IP블록", "인프라팀", "담당 이메일", reason_col])
             for item in selected_ips:
                 ws.append(
                     [
@@ -154,11 +161,18 @@ class CandidateService:
                         item.get("ip_address"),
                         item.get("owner_team"),
                         item.get("owner_email"),
+                        str(item.get("decision_reason", "") or ""),
                     ]
                 )
         bio = BytesIO()
         wb.save(bio)
         return bio.getvalue()
+
+    @staticmethod
+    def build_review_excel_base64(selected_ips: List[dict]) -> Optional[str]:
+        if not selected_ips:
+            return None
+        return base64.b64encode(CandidateService._build_review_excel_bytes(selected_ips)).decode("ascii")
 
     def send_review_mails(self, selected_ips: List[dict], override_recipients: Optional[List[str]] = None) -> Dict:
         print("\n🚀 [FUNC: send_review_mails(CandidateService)]")
@@ -191,10 +205,15 @@ class CandidateService:
             "안녕하세요. IPAM AI Agent입니다.",
             "아래 IP 회수 후보에 대한 검토를 요청드립니다.",
             "첨부 엑셀은 선정된 회수 후보만 포함합니다(제외 행 제거).",
+            "각 행의 '회수 사유' 열에 선정 근거가 기재되어 있습니다.",
             "",
         ]
         for item in selected_ips[:30]:
-            body_lines.append(f"- {item.get('owner_team')} | {item.get('nw_id')} | {item.get('ip_address')}")
+            reason = str(item.get("decision_reason", "") or "").strip()
+            reason_part = f" | 회수 사유: {reason}" if reason else ""
+            body_lines.append(
+                f"- {item.get('owner_team')} | {item.get('nw_id')} | {item.get('ip_address')}{reason_part}"
+            )
         body_lines.append("")
         body_lines.append("검토 후 회신 부탁드립니다.")
         body = "\n".join(body_lines)
@@ -425,6 +444,7 @@ class CandidateService:
                     "ip_address": selected_item["ip_address"],
                     "owner_team": selected_item["owner_team"],
                     "owner_email": selected_item["owner_email"],
+                    "decision_reason": selected_item["decision_reason"],
                     "excel_row": excel_row,
                 }
             )

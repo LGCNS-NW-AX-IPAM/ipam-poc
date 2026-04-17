@@ -63,7 +63,8 @@ async def upload_candidates_by_context(
             default_owner_email=default_owner_email,
         )
         message = service.build_extract_response_message(result)
-        return {**result, "content": message, "mode": "extract"}
+        review_excel_base64 = service.build_review_excel_base64(result.get("selected_ips") or [])
+        return {**result, "content": message, "mode": "extract", "review_excel_base64": review_excel_base64}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -94,7 +95,8 @@ async def extract_candidates_from_excel(
             default_owner_email=default_owner_email,
         )
         message = service.build_extract_response_message(result)
-        return {**result, "content": message}
+        review_excel_base64 = service.build_review_excel_base64(result.get("selected_ips") or [])
+        return {**result, "content": message, "review_excel_base64": review_excel_base64}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
