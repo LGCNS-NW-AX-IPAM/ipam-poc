@@ -331,7 +331,7 @@ class CandidateService:
 
         apartment_name = str(row_context.get("apartment_name", "") or "").strip()
         if apartment_name:
-            parts.append(f"단지명: {apartment_name}")
+            parts.append(f"NTOSS 아파트명: {apartment_name}")
 
         return " / ".join(parts)
 
@@ -562,48 +562,43 @@ class CandidateService:
         }
 
     def build_extract_response_message(self, result: Dict) -> str:
-        prompt = build_extract_analysis_llm_prompt(result)
-        try:
-            res = self.llm.invoke([HumanMessage(content=prompt)])
-            return str(res.content).strip()
-        except Exception:
-            selected_preview = result.get("selected_preview", []) or []
-            excluded_details = result.get("excluded_details", []) or []
-            usage_threshold = (result.get("selection_policy", {}) or {}).get("usage_threshold_percent", "-")
+        selected_preview = result.get("selected_preview", []) or []
+        excluded_details = result.get("excluded_details", []) or []
+        usage_threshold = (result.get("selection_policy", {}) or {}).get("usage_threshold_percent", "-")
 
-            lines = [
-                "엑셀 분석 결과 요약",
-                f"- 후보 건수: {result.get('selected_count', 0)}건",
-                f"- 제외 건수: {result.get('skipped_count', 0)}건",
-                f"- 기준 IP사용률: {usage_threshold}%",
-                f"- 선정 기준: {get_selection_criteria_summary()}",
-                "",
-                "후보 목록",
-            ]
+        lines = [
+            "엑셀 분석 결과 요약",
+            f"- 후보 건수: {result.get('selected_count', 0)}건",
+            f"- 제외 건수: {result.get('skipped_count', 0)}건",
+            f"- 기준 IP사용률: {usage_threshold}%",
+            f"- 선정 기준: {get_selection_criteria_summary()}",
+            "",
+            "후보 목록",
+        ]
 
-            if selected_preview:
-                for item in selected_preview:
-                    lines.append(
-                        f"- {item.get('owner_team')} | {item.get('nw_id')} | {item.get('ip_address')} | "
-                        f"사용률 {item.get('usage_percent')}% | 근거: {item.get('decision_reason', '정책 기준 충족')}"
-                    )
-            else:
-                lines.append("- 후보 없음")
+        if selected_preview:
+            for item in selected_preview:
+                lines.append(
+                    f"- {item.get('owner_team')} | {item.get('nw_id')} | {item.get('ip_address')} | "
+                    f"사용률 {item.get('usage_percent')}% | 근거: {item.get('decision_reason', '정책 기준 충족')}"
+                )
+        else:
+            lines.append("- 후보 없음")
 
-            lines.append("")
-            lines.append("제외 목록")
-            if excluded_details:
-                for item in excluded_details:
-                    lines.append(
-                        f"- {item.get('owner_team')} | {item.get('nw_id')} | {item.get('ip_address')} | "
-                        f"사용률 {item.get('usage_percent')}% | 제외 사유: {item.get('exclude_reason', '정책 기준 미충족')}"
-                    )
-            else:
-                lines.append("- 제외 없음")
+        lines.append("")
+        lines.append("제외 목록")
+        if excluded_details:
+            for item in excluded_details:
+                lines.append(
+                    f"- {item.get('owner_team')} | {item.get('nw_id')} | {item.get('ip_address')} | "
+                    f"사용률 {item.get('usage_percent')}% | 제외 사유: {item.get('exclude_reason', '정책 기준 미충족')}"
+                )
+        else:
+            lines.append("- 제외 없음")
 
-            lines.append("")
-            lines.append(EXTRACT_RESPONSE_TEMPLATE_FOOTER)
-            return "\n".join(lines)
+        lines.append("")
+        lines.append(EXTRACT_RESPONSE_TEMPLATE_FOOTER)
+        return "\n".join(lines)
 
     def build_finalize_response_message(self, result: Dict) -> str:
         selected_count = result.get("selected_count", 0)
