@@ -89,7 +89,7 @@ SEMANTIC_EXCLUSION_CATEGORIES: List[Dict[str, Any]] = [
             "휴대폰 판매·대리점, 통신사 직영·대리점 등 단기 이동·이벤트 매장 특성이 강한 명칭인지."
         ),
         "examples": ["OO텔레콤", "휴대폰 대리점", "공식대리점"],
-        "enabled": False,
+        "enabled": True,
     },
 ]
 

@@ -17,8 +17,79 @@ function App() {
   const [selectedFileName, setSelectedFileName] = useState('');
 
   const [isLoading, setIsLoading] = useState(false);
+  const [expandedExcludedByMsg, setExpandedExcludedByMsg] = useState({});
   const scrollRef = useRef(null);
   const fileInputRef = useRef(null);
+
+  const parseExcludedSection = (content) => {
+    const lines = String(content || '').split('\n');
+    const headerIdx = lines.findIndex((line) => line.trim() === '제외 목록');
+    if (headerIdx < 0) {
+      return { hasExcludedSection: false };
+    }
+
+    let start = headerIdx + 1;
+    while (start < lines.length && !lines[start].trim()) start += 1;
+    if (start >= lines.length || !lines[start].trim().startsWith('- ')) {
+      return { hasExcludedSection: false };
+    }
+
+    let end = start;
+    while (end < lines.length) {
+      const trimmed = lines[end].trim();
+      if (!trimmed) {
+        const nextTrimmed = (lines[end + 1] || '').trim();
+        if (!nextTrimmed.startsWith('- ')) break;
+      } else if (!trimmed.startsWith('- ')) {
+        break;
+      }
+      end += 1;
+    }
+
+    const excludedItems = lines.slice(start, end).filter((line) => line.trim().startsWith('- '));
+    return {
+      hasExcludedSection: true,
+      lines,
+      listStart: start,
+      listEnd: end,
+      excludedItems,
+    };
+  };
+
+  const buildExcludedLimitedMarkdown = (content, isExpanded) => {
+    const parsed = parseExcludedSection(content);
+    if (!parsed.hasExcludedSection) {
+      return {
+        markdown: content,
+        hasMoreExcluded: false,
+        hiddenExcludedCount: 0,
+      };
+    }
+
+    const limit = 10;
+    if (parsed.excludedItems.length <= limit || isExpanded) {
+      return {
+        markdown: content,
+        hasMoreExcluded: parsed.excludedItems.length > limit,
+        hiddenExcludedCount: 0,
+      };
+    }
+
+    const visibleItems = parsed.excludedItems.slice(0, limit);
+    const hiddenCount = parsed.excludedItems.length - limit;
+    const rebuilt = [
+      ...parsed.lines.slice(0, parsed.listStart),
+      ...visibleItems,
+      `- ...외 ${hiddenCount}건`,
+      ...parsed.lines.slice(parsed.listEnd),
+    ].join('\n');
+
+    return {
+      markdown: rebuilt,
+      hasMoreExcluded: true,
+      hiddenExcludedCount: hiddenCount,
+    };
+  };
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -170,6 +241,15 @@ function App() {
                   <p className="whitespace-pre-wrap text-[15px]">{msg.content}</p>
                 ) : (
                   <div className="markdown-container text-[15px]">
+                    {(() => {
+                      const isExpanded = !!expandedExcludedByMsg[index];
+                      const {
+                        markdown,
+                        hasMoreExcluded,
+                        hiddenExcludedCount,
+                      } = buildExcludedLimitedMarkdown(msg.content, isExpanded);
+                      return (
+                        <>
                     <ReactMarkdown 
                       remarkPlugins={[remarkGfm]}
                       components={{
@@ -192,8 +272,25 @@ function App() {
                         )
                       }}
                     >
-                      {msg.content}
+                      {markdown}
                     </ReactMarkdown>
+                          {hasMoreExcluded && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setExpandedExcludedByMsg((prev) => ({
+                                  ...prev,
+                                  [index]: !isExpanded,
+                                }))
+                              }
+                              className="mt-2 text-xs text-emerald-300 hover:text-emerald-200 underline underline-offset-2"
+                            >
+                              {isExpanded ? '제외 목록 접기' : `제외 목록 더보기 (${hiddenExcludedCount}건)`}
+                            </button>
+                          )}
+                        </>
+                      );
+                    })()}
                   </div>
                 )}
                 
