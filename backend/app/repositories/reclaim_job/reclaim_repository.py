@@ -1,3 +1,4 @@
+from typing import List as TypingList
 from sqlalchemy.orm import Session
 from sqlalchemy import func, select, and_, delete
 from app.models.entities import IpReclaimCandidate, IpReclaimPreview
@@ -7,7 +8,7 @@ class ReclaimRepository:
     def __init__(self, db: Session):
         self.db = db
 
-    def get_flexible_candidates(self, team_limit: int = 4, total_limit: int = 20, target_team: str = None):
+    def get_flexible_candidates(self, team_limit: int = 4, total_limit: int = 20, target_team: str = None, excluded_teams: TypingList[str] = None):
         """
         ORM 기반 팀별 균형 추출 로직 (MySQL 8.0 에러 해결 버전)
         """
@@ -19,14 +20,17 @@ class ReclaimRepository:
         ).label("team_rn")
 
         # 2. 필터 조건 구성
-        # 팁: Enum 객체(ReclaimStatus.READY) 대신 문자열 "READY"를 직접 비교하는 것이 
+        # 팁: Enum 객체(ReclaimStatus.READY) 대신 문자열 "READY"를 직접 비교하는 것이
         # DB 드라이버에 따라 더 안전할 수 있습니다.
         filters = [
             IpReclaimCandidate.status == "READY",
         ]
-        
+
         if target_team:
             filters.append(IpReclaimCandidate.owner_team == target_team)
+
+        if excluded_teams:
+            filters.append(IpReclaimCandidate.owner_team.notin_(excluded_teams))
 
         # 3. 서브쿼리
         subq = (

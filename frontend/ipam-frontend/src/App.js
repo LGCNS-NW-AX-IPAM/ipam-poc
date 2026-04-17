@@ -10,8 +10,10 @@ function App() {
     { role: 'assistant', content: '안녕하세요. **IPAM AI Assistant**입니다. 오늘 진행할 IP 회수 작업이 있으신가요?' }
   ]);
   
-  const [selectedIps, setSelectedIps] = useState([]); 
+  const [selectedIps, setSelectedIps] = useState([]);
   const [maxPerTeam, setMaxPerTeam] = useState(4);
+  const [excludedFilters, setExcludedFilters] = useState([]);
+  const [isConfirmed, setIsConfirmed] = useState(false);
   const [selectedFileName, setSelectedFileName] = useState('');
   
   const [isLoading, setIsLoading] = useState(false);
@@ -40,17 +42,17 @@ function App() {
       const response = await axios.post('http://localhost:8000/api/v1/chat', {
         history: updatedMessages,
         selected_ips: selectedIps,
-        max_per_team: maxPerTeam
+        max_per_team: maxPerTeam,
+        excluded_filters: excludedFilters,
+        is_confirmed: isConfirmed,
       });
 
-      const { content, selected_ips, max_per_team } = response.data;
+      const { content, selected_ips, max_per_team, excluded_filters, is_confirmed } = response.data;
 
-      if (selected_ips) {
-        setSelectedIps(selected_ips);
-      }
-      if (max_per_team) {
-        setMaxPerTeam(max_per_team);
-      }
+      if (selected_ips) setSelectedIps(selected_ips);
+      if (max_per_team) setMaxPerTeam(max_per_team);
+      if (excluded_filters !== undefined) setExcludedFilters(excluded_filters);
+      if (is_confirmed !== undefined) setIsConfirmed(is_confirmed);
 
       const assistantMessage = { 
         role: 'assistant', 

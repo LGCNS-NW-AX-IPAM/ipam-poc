@@ -7,20 +7,23 @@ class JobRepository:
     def __init__(self, db: Session):
         self.db = db
 
-    def get_jobs_by_filter(self, 
-                           job_id: str = None, 
-                           owner_team: str = None, 
-                           item_status: Union[str, List[str]] = None, # 💡 타입 힌트 추가
-                           job_status: Union[str, List[str]] = None, 
+    def get_jobs_by_filter(self,
+                           job_id: str = None,
+                           sub_task_id: str = None,
+                           owner_team: str = None,
+                           item_status: Union[str, List[str]] = None,
+                           job_status: Union[str, List[str]] = None,
                            limit: int = 50):
-        
+
         query = self.db.query(IpReclaimJobItem).join(
             IpReclaimJob, IpReclaimJobItem.ip_reclaim_job_id == IpReclaimJob.ip_reclaim_job_id
         )
-        
+
         filters = []
         if job_id:
             filters.append(IpReclaimJob.main_task_id == job_id)
+        if sub_task_id:
+            filters.append(IpReclaimJob.sub_task_id == sub_task_id)
         if owner_team:
             filters.append(IpReclaimJobItem.owner_team == owner_team)
             

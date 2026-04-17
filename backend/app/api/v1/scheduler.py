@@ -7,6 +7,7 @@ from app.core.database import SessionLocal
 from app.repositories.reclaim_job.job_repository import JobRepository
 from app.client.ntoss_client import NtossClient
 from app.utils.gmail_service import send_error_notification
+from app.llm.reclaim_agent import reclaim_graph
 
 router = APIRouter()
 logger = logging.getLogger("SCHEDULER")
@@ -137,25 +138,29 @@ def run_device_reclaim():
 
 
 class MailReplyRequest(BaseModel):
-    ip_address: str
-    action: str  # APPROVE | REJECT
+    content: str  # 담당자 메일 회신 본문
 
 
 @router.post("/scheduler/mail-reply")
 def handle_mail_reply(req: MailReplyRequest):
     """
     [Mock] 담당자 메일 회신 처리
-    - APPROVE: 승인 (기존 IN-PROGRESS 유지, DHCP 회수 예정)
-    - REJECT: 회수 대상 제외 (REJECTED 상태 변경)
+    - content(메일 본문)를 reclaim_agent 가 분석하여 APPROVE / REJECT 처리
+    - APPROVE: 기존 IN-PROGRESS 유지 (11:00 DHCP 회수 스케줄 포함)
+    - REJECT: 본문에 명시된 IP → REJECTED, 명시 없으면 전체 IN-PROGRESS 대상
     """
-    if req.action.upper() == "REJECT":
-        db = SessionLocal()
-        try:
-            repo = JobRepository(db)
-            filters = [{"target": "ip_address", "value": [req.ip_address]}]
-            count = repo.bulk_update_item_status_by_filters(filters, "REJECTED")
-            return {"message": f"{req.ip_address} 회수 제외 처리 완료", "updated": count}
-        finally:
-            db.close()
-    else:
-        return {"message": f"{req.ip_address} 승인 처리 완료. 11:00 DHCP 회수 스케줄에 포함됩니다."}
+    state = {
+        "messages": [{"role": "user", "content": req.content}],
+        "intents": [],
+        "current_intent": "",
+        "query_plan": {},
+        "selected_ips": [],
+        "max_per_team": 4,
+        "excluded_filters": [],
+        "is_confirmed": True,   # 이미 확정된 상태 → REJECT 시 DB에 반영
+    }
+    result = reclaim_graph.invoke(state)
+
+    last_msg = result["messages"][-1]
+    response_content = last_msg.content if hasattr(last_msg, "content") else last_msg.get("content")
+    return {"message": response_content}

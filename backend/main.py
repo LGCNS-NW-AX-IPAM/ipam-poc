@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
 from app.api.v1.chat import router as chat_router
+from app.api.v1.scheduler import router as scheduler_router
 from app.client.ntoss_client import NtossClient
 import logging
 
@@ -38,6 +39,7 @@ app.add_middleware(
 # API 라우터 등록
 # /api/v1/chat 으로 들어오는 요청은 이제 Master Router가 처리합니다.
 app.include_router(chat_router, prefix="/api/v1", tags=["Chat"])
+app.include_router(scheduler_router, prefix="/api/v1", tags=["Scheduler"])
 
 @app.get("/")
 async def root():

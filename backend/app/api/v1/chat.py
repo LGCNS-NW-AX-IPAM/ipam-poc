@@ -20,17 +20,21 @@ class ChatRequest(BaseModel):
     history: List[dict]
     max_per_team: Optional[int] = 4
     selected_ips: Optional[List[dict]] = []
+    excluded_filters: Optional[List[dict]] = []
+    is_confirmed: Optional[bool] = False
 
 @router.post("/chat")
 async def chat(req: ChatRequest):
     # Multi-Agent 환경에 맞는 초기 상태 구성
     initial_state = {
-        "messages": req.history, 
-        "domain": "",         # 라우터가 판단할 영역 (candidate/reclaim)
-        "intent": "",         # 서브 에이전트가 판단할 의도
-        "query_plan": {},     # Query Construction 결과
+        "messages": req.history,
+        "domain": "",              # 라우터가 판단할 영역 (candidate/reclaim)
+        "intent": "",              # 서브 에이전트가 판단할 의도
+        "query_plan": {},          # Query Construction 결과
         "selected_ips": req.selected_ips,
-        "max_per_team": req.max_per_team
+        "max_per_team": req.max_per_team,
+        "excluded_filters": req.excluded_filters,
+        "is_confirmed": req.is_confirmed,
     }
     
     # 이제 특정 에이전트가 아닌 '마스터 그래프'를 실행합니다.
@@ -44,7 +48,9 @@ async def chat(req: ChatRequest):
         "content": response_content,
         "max_per_team": result.get("max_per_team", req.max_per_team),
         "selected_ips": result.get("selected_ips", req.selected_ips),
-        "domain": result.get("domain") # (디버깅용) 어떤 에이전트가 응답했는지 확인 가능
+        "excluded_filters": result.get("excluded_filters", req.excluded_filters),
+        "is_confirmed": result.get("is_confirmed", req.is_confirmed),
+        "domain": result.get("domain"),  # (디버깅용) 어떤 에이전트가 응답했는지 확인 가능
     }
 
 
