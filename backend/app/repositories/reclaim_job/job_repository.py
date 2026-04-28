@@ -1,6 +1,7 @@
+from datetime import date, timedelta
 from sqlalchemy.orm import Session
-from sqlalchemy import desc, and_, select
-from typing import Union, List
+from sqlalchemy import desc, and_, select, cast, Date as SADate
+from typing import Union, List, Optional
 from app.models.entities import IpReclaimJob, IpReclaimJobItem, IpReclaimCandidate
 
 class JobRepository:
@@ -13,6 +14,8 @@ class JobRepository:
                            owner_team: str = None,
                            item_status: Union[str, List[str]] = None,
                            job_status: Union[str, List[str]] = None,
+                           date_from: Optional[date] = None,
+                           date_to: Optional[date] = None,
                            limit: int = 50):
 
         query = self.db.query(IpReclaimJobItem).join(
@@ -26,22 +29,27 @@ class JobRepository:
             filters.append(IpReclaimJob.sub_task_id == sub_task_id)
         if owner_team:
             filters.append(IpReclaimJobItem.owner_team == owner_team)
-            
+
         if item_status:
             if isinstance(item_status, list):
                 filters.append(IpReclaimJobItem.item_status.in_(item_status))
             else:
                 filters.append(IpReclaimJobItem.item_status == item_status)
-            
+
         if job_status:
             if isinstance(job_status, list):
                 filters.append(IpReclaimJob.job_status.in_(job_status))
             else:
                 filters.append(IpReclaimJob.job_status == job_status)
-            
+
+        if date_from:
+            filters.append(cast(IpReclaimJob.created_at, SADate) >= date_from)
+        if date_to:
+            filters.append(cast(IpReclaimJob.created_at, SADate) <= date_to)
+
         if filters:
             query = query.filter(and_(*filters))
-            
+
         return query.order_by(desc(IpReclaimJobItem.created_at)).limit(limit).all()
 
     def get_latest_job_summary(self):
@@ -94,6 +102,30 @@ class JobRepository:
             return True
         return False
     
+    def get_job_by_id(self, job_id: int) -> Optional[IpReclaimJob]:
+        """job_id로 잡 단건 조회"""
+        return self.db.query(IpReclaimJob).filter(
+            IpReclaimJob.ip_reclaim_job_id == job_id
+        ).first()
+
+    def get_failed_items_direct(
+        self,
+        statuses: List[str],
+        ip_addresses: List[str] = None,
+        owner_team: str = None,
+    ) -> List[IpReclaimJobItem]:
+        """상태 + IP/팀 조건으로 아이템 직접 조회 (잡 상태 무관)"""
+        conditions = [IpReclaimJobItem.item_status.in_(statuses)]
+        if ip_addresses:
+            conditions.append(IpReclaimJobItem.ip_address.in_(ip_addresses))
+        if owner_team:
+            conditions.append(IpReclaimJobItem.owner_team == owner_team)
+        return (
+            self.db.query(IpReclaimJobItem)
+            .filter(and_(*conditions))
+            .all()
+        )
+
     def get_active_job(self):
         """현재 활성 작업(READY, IN-PROGRESS) 조회 - 가장 최근 작업 반환"""
         return (
@@ -138,6 +170,33 @@ class JobRepository:
                     setattr(item, key, val)
             self.db.commit()
         return item
+
+    def approve_items(self, new_status: str, ip_addresses: List[str] = None, owner_team: str = None) -> int:
+        """IN-PROGRESS 아이템을 new_status로 업데이트 (담당자 부분/전체 승인)"""
+        try:
+            job = self.get_active_job()
+            if not job:
+                return 0
+
+            conditions = [
+                IpReclaimJobItem.ip_reclaim_job_id == job.ip_reclaim_job_id,
+                IpReclaimJobItem.item_status == "IN-PROGRESS",
+            ]
+            if ip_addresses:
+                conditions.append(IpReclaimJobItem.ip_address.in_(ip_addresses))
+            if owner_team:
+                conditions.append(IpReclaimJobItem.owner_team == owner_team)
+
+            count = (
+                self.db.query(IpReclaimJobItem)
+                .filter(and_(*conditions))
+                .update({IpReclaimJobItem.item_status: new_status}, synchronize_session=False)
+            )
+            self.db.commit()
+            return count
+        except Exception as e:
+            self.db.rollback()
+            raise e
 
     def bulk_update_item_status_by_filters(self, filter_list: List[dict], new_status: str):
         """

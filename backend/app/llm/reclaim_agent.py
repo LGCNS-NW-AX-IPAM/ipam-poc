@@ -3,7 +3,8 @@ import os
 import json
 import re
 import logging
-from typing import TypedDict, List, Annotated, Union
+from datetime import date
+from typing import TypedDict, List, Annotated, Union, Optional
 
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -14,7 +15,11 @@ from app.client.ntoss_client import NtossClient
 from app.core.database import SessionLocal
 from app.repositories.reclaim_job.reclaim_repository import ReclaimRepository
 from app.repositories.reclaim_job.job_repository import JobRepository
-from app.utils.gmail_service import send_reclaim_notification
+from app.utils.gmail_service import (
+    send_reclaim_notification,
+    send_dhcp_action_completion,
+    send_device_action_completion,
+)
 
 load_dotenv()
 logger = logging.getLogger("RECLAIM_OPERATOR")
@@ -67,12 +72,14 @@ class ReclaimAgent:
 사용자 요청에서 수행해야 할 작업을 실행 순서대로 추출하세요.
 
 [의도 종류]
-- REJECT  : 특정 IP, 팀, 대역 등 구체적인 대상을 작업에서 제외 요청 ("빼줘", "제외", "취소", "불가", "반대", "보류" 등)
-- APPROVE : IP 회수 작업을 승인 ("승인", "확인", "동의", "진행해주세요", "괜찮습니다" 등) — 담당자 메일 회신에서 주로 발생
-- START   : 금일 회수할 IP 후보 목록을 뽑아달라는 요청. 다시 뽑기, 조건 변경 후 재조회 포함
-- CONFIRM : 준비된 목록을 확정하고 메일 발송 및 NTOSS 등록
-- STATUS  : 이미 확정된 작업의 DHCP/장비 회수 진행 현황 조회
-- CHAT    : 단순 인사, 사용법 문의 등
+- REJECT          : 특정 IP, 팀, 대역 등 구체적인 대상을 작업에서 제외 요청 ("빼줘", "제외", "취소", "불가", "반대", "보류" 등)
+- APPROVE         : IP 회수 작업 승인 ("승인", "확인", "동의", "진행해주세요", "괜찮습니다" 등) — 담당자 메일 회신에서 주로 발생
+- START           : 금일 회수할 IP 후보 목록을 뽑아달라는 요청. 다시 뽑기, 조건 변경 후 재조회 포함
+- CONFIRM         : 준비된 목록을 확정하고 메일 발송 및 NTOSS 등록
+- STATUS          : 이미 확정된 작업의 DHCP/장비 회수 진행 현황 조회
+- DHCP_RECOVERY   : DHCP 회수 실패 건에 대한 조치 요청 ("DHCP 조치해줘", "DHCP 처리해주세요" 등)
+- DEVICE_RECOVERY : 장비 회수 실패 건에 대한 조치 요청 ("장비 조치해줘", "Device 처리해주세요" 등)
+- CHAT            : 단순 인사, 사용법 문의 등
 
 [START vs STATUS 핵심 구분]
 - START : 아직 확정 전, 오늘 작업 후보를 뽑는 단계
@@ -102,13 +109,19 @@ class ReclaimAgent:
 - "DHCP 회수 결과 어때" → STATUS
 - "클라우드팀은 빼줘" → REJECT
 - "승인합니다" → APPROVE
+- "클라우드팀만 승인합니다" → APPROVE
+- "10.0.0.1, 10.0.0.2 승인합니다" → APPROVE
 - "10.0.0.1 제외해주세요. 나머지는 진행해주세요." → REJECT
 - "확인했습니다. 진행해주세요." → APPROVE
+- "10.100.5.41 DHCP 조치해줘" → DHCP_RECOVERY
+- "클라우드팀 장비 조치 부탁드립니다" → DEVICE_RECOVERY
+- "DHCP랑 장비 둘 다 처리해줘" → DHCP_RECOVERY,DEVICE_RECOVERY
+- "10.0.0.1 DHCP 처리, 10.0.0.2 장비 처리 해주세요" → DHCP_RECOVERY,DEVICE_RECOVERY
 """
         response = self.llm.invoke([SystemMessage(content=system_prompt)] + history)
         raw = response.content.strip().upper()
 
-        valid = {"START", "CONFIRM", "STATUS", "REJECT", "APPROVE", "CHAT"}
+        valid = {"START", "CONFIRM", "STATUS", "REJECT", "APPROVE", "CHAT", "DHCP_RECOVERY", "DEVICE_RECOVERY"}
         intents = [i.strip() for i in raw.split(",") if i.strip() in valid]
         if not intents:
             intents = ["CHAT"]
@@ -139,9 +152,11 @@ class ReclaimAgent:
         history = self._convert_to_messages(state["messages"])
         max_per_team = state.get("max_per_team", 4)
 
-        db_specs = """
+        today_str = date.today().isoformat()
+        db_specs = f"""
 [DATABASE SPECIFICATION]
 1. ip_reclaim_job (메인 작업): job_status = 'READY' | 'IN-PROGRESS' | 'DONE'
+   - created_at: 작업 생성 일시 (날짜 필터에 사용)
 2. ip_reclaim_job_item (상세): item_status = 'READY' | 'IN-PROGRESS' | 'REJECTED' |
    'DHCP_SUCCESS' | 'DHCP_FAILED' | 'DEVICE_SUCCESS' | 'DEVICE_FAILED'
 
@@ -149,6 +164,9 @@ class ReclaimAgent:
 - STATUS/REJECT: job_status IN ('READY', 'IN-PROGRESS') 필터 필수
 - REJECT target 종류: owner_team, ip_address(리스트), ip_range, owner_email
 - START: team_limit(팀당 최대), total_limit(전체 최대) 포함
+- STATUS 날짜 필터: date_from, date_to (ISO 8601, "YYYY-MM-DD") 사용
+  - 오늘 날짜: {today_str}
+  - 주차 계산: 1주 = 월~일 기준
 """
         examples = f"""
 [EXAMPLES]
@@ -160,6 +178,19 @@ STATUS 전체: {{"job_status": ["READY", "IN-PROGRESS", "DONE"], "filters": [], 
 STATUS 장애: {{"filters": [{{"target": "item_status", "value": ["DHCP_FAILED", "DEVICE_FAILED"]}}], "job_status": ["READY", "IN-PROGRESS", "DONE"], "action": "STATUS"}}
 STATUS 특정 서브작업: {{"filters": [{{"target": "sub_task_id", "value": "NTOSS-SUB-XXXXXX"}}], "action": "STATUS"}}
 STATUS 특정 메인작업: {{"filters": [{{"target": "job_id", "value": "NTOSS-MAIN-XXXXXX"}}], "action": "STATUS"}}
+STATUS 오늘: {{"job_status": ["READY", "IN-PROGRESS", "DONE"], "filters": [], "date_from": "{today_str}", "date_to": "{today_str}", "action": "STATUS"}}  ← "오늘 진행 현황", "금일 현황"
+STATUS 특정 날짜: {{"job_status": ["READY", "IN-PROGRESS", "DONE"], "filters": [], "date_from": "2026-04-20", "date_to": "2026-04-20", "action": "STATUS"}}  ← "4월20일 진행 현황"
+STATUS 날짜 범위: {{"job_status": ["READY", "IN-PROGRESS", "DONE"], "filters": [], "date_from": "2026-04-17", "date_to": "2026-04-19", "action": "STATUS"}}  ← "4월 17일부터 19일까지"
+STATUS 주차: {{"job_status": ["READY", "IN-PROGRESS", "DONE"], "filters": [], "date_from": "2026-04-13", "date_to": "2026-04-19", "action": "STATUS"}}  ← "4월 셋째주"
+APPROVE 전체: {{"filters": [], "action": "APPROVE"}}
+APPROVE 특정 IP: {{"filters": [{{"target": "ip_address", "value": ["10.0.0.1", "10.0.0.2"]}}], "action": "APPROVE"}}
+APPROVE 팀: {{"filters": [{{"target": "owner_team", "value": "클라우드팀"}}], "action": "APPROVE"}}
+DHCP_RECOVERY 전체: {{"filters": [], "action": "DHCP_RECOVERY"}}
+DHCP_RECOVERY 특정 IP: {{"filters": [{{"target": "ip_address", "value": ["10.100.5.41"]}}], "action": "DHCP_RECOVERY"}}
+DHCP_RECOVERY 팀: {{"filters": [{{"target": "owner_team", "value": "클라우드팀"}}], "action": "DHCP_RECOVERY"}}
+DEVICE_RECOVERY 전체: {{"filters": [], "action": "DEVICE_RECOVERY"}}
+DEVICE_RECOVERY 특정 IP: {{"filters": [{{"target": "ip_address", "value": ["10.0.0.1"]}}], "action": "DEVICE_RECOVERY"}}
+DEVICE_RECOVERY 팀: {{"filters": [{{"target": "owner_team", "value": "네트워크팀"}}], "action": "DEVICE_RECOVERY"}}
 
 [START 파라미터 추출 규칙]
 - "N개만", "N개로", "총 N개", "전체 N개", "IP N개" 같은 표현에서 N을 total_limit으로 추출
@@ -177,8 +208,12 @@ STATUS 특정 메인작업: {{"filters": [{{"target": "job_id", "value": "NTOSS-
         try:
             content = re.sub(r"```json|```", "", response.content).strip()
             plan = json.loads(content)
+            if isinstance(plan, list):
+                plan = plan[0] if plan and isinstance(plan[0], dict) else {}
         except Exception:
-            plan = {"filters": [], "job_status": ["READY", "IN-PROGRESS"]}
+            plan = {}
+        if not isinstance(plan, dict):
+            plan = {}
 
         # START 인텐트: 숫자 추출 regex fallback (LLM 오판 방지)
         if intent == "START":
@@ -262,21 +297,41 @@ STATUS 특정 메인작업: {{"filters": [{{"target": "job_id", "value": "NTOSS-
                     elif t == "job_id":
                         job_id_filter = f.get("value")
 
-                # 완료된 작업도 포함 (DONE 추가)
                 # 특정 작업 ID가 지정된 경우 job_status 필터 없이 전체 조회
                 if sub_task_id_filter or job_id_filter:
                     job_status_filter = None
                 else:
                     job_status_filter = plan.get("job_status", ["READY", "IN-PROGRESS", "DONE"])
 
+                # 날짜 범위 필터 추출
+                date_from: Optional[date] = None
+                date_to: Optional[date] = None
+                if plan.get("date_from"):
+                    try:
+                        date_from = date.fromisoformat(plan["date_from"])
+                    except ValueError:
+                        pass
+                if plan.get("date_to"):
+                    try:
+                        date_to = date.fromisoformat(plan["date_to"])
+                    except ValueError:
+                        pass
+
                 results = repo.get_jobs_by_filter(
                     job_id=job_id_filter,
                     sub_task_id=sub_task_id_filter,
                     item_status=item_status_filter,
                     job_status=job_status_filter,
+                    date_from=date_from,
+                    date_to=date_to,
                 )
                 status_data = [
-                    {"ip": r.ip_address, "status": r.item_status, "team": r.owner_team}
+                    {
+                        "ip": r.ip_address,
+                        "status": r.item_status,
+                        "team": r.owner_team,
+                        "date": r.created_at.strftime("%Y-%m-%d") if r.created_at else "",
+                    }
                     for r in results
                 ]
                 print(f"📦 상태 조회: {len(status_data)}건")
@@ -378,39 +433,51 @@ STATUS 특정 메인작업: {{"filters": [{{"target": "job_id", "value": "NTOSS-
     # ───────────────────────────────────────────────
     def approve_handler(self, state: AgentState):
         """
-        담당자 메일 승인 처리.
-        - query_plan 의 filters 에 IP 목록이 있으면 해당 IP만 승인 응답
-        - filters 가 없으면 전체 IN-PROGRESS 대상 승인 응답
-        - 실제 DB 상태 변경 없음 (IN-PROGRESS 유지 → 이후 /scheduler/dhcp 에서 처리)
+        담당자 승인 처리.
+        - filters 에 IP/팀 지정 시 해당 대상만 OWNER_CONFIRMED 로 업데이트 (부분 승인)
+        - filters 없으면 전체 IN-PROGRESS 아이템을 OWNER_CONFIRMED 로 업데이트 (전체 승인)
         """
         print("🚀 [NODE: approve_handler]")
         plan = state.get("query_plan", {})
         filters = plan.get("filters", [])
 
-        # filters 에서 IP 목록 추출
-        target_ips = []
+        ip_addresses = []
+        owner_team = None
         for f in filters:
-            if f.get("target") == "ip_address":
-                val = f.get("value")
+            t = f.get("target")
+            val = f.get("value")
+            if t == "ip_address":
                 if isinstance(val, list):
-                    target_ips.extend(val)
+                    ip_addresses.extend(val)
                 elif val:
-                    target_ips.append(val)
+                    ip_addresses.append(val)
+            elif t == "owner_team":
+                owner_team = val
 
-        if target_ips:
-            ip_list = ", ".join(target_ips)
+        db = SessionLocal()
+        try:
+            repo = JobRepository(db)
+            count = repo.approve_items(
+                "OWNER_CONFIRMED",
+                ip_addresses=ip_addresses if ip_addresses else None,
+                owner_team=owner_team,
+            )
+
+            if ip_addresses:
+                target_desc = f"{', '.join(ip_addresses)}"
+            elif owner_team:
+                target_desc = f"{owner_team}"
+            else:
+                target_desc = "전체"
+
             msg = (
                 f"IPAM AI Assistant입니다. "
-                f"{ip_list} 승인 처리되었습니다. "
+                f"{target_desc} 대상 {count}건이 담당자 확인 완료(OWNER_CONFIRMED) 처리되었습니다. "
                 f"11:00 DHCP 회수 스케줄에 포함됩니다."
             )
-        else:
-            msg = (
-                "IPAM AI Assistant입니다. "
-                "승인 처리되었습니다. "
-                "전체 IN-PROGRESS 대상이 11:00 DHCP 회수 스케줄에 포함됩니다."
-            )
-        return {"messages": [AIMessage(content=msg)]}
+            return {"messages": [AIMessage(content=msg)]}
+        finally:
+            db.close()
 
     # ───────────────────────────────────────────────
     # [NODE 7] task_executor (CONFIRM)
@@ -496,7 +563,144 @@ STATUS 특정 메인작업: {{"filters": [{{"target": "job_id", "value": "NTOSS-
             db.close()
 
     # ───────────────────────────────────────────────
-    # [NODE 7] responder
+    # [NODE 7] dhcp_recovery_handler (DHCP_RECOVERY)
+    # ───────────────────────────────────────────────
+    def dhcp_recovery_handler(self, state: AgentState):
+        """
+        DHCP 회수 실패 조치.
+        - query_plan filters 의 IP/팀 기준으로 DHCP_FAILED 아이템 필터링 (미지정 시 전체)
+        - cancel_task_item 호출 → REJECTED → 담당자 완료 메일
+        """
+        print("🚀 [NODE: dhcp_recovery_handler]")
+        plan = state.get("query_plan", {})
+        filters = plan.get("filters", [])
+
+        ip_filter: List[str] = []
+        team_filter: Optional[str] = None
+        for f in filters:
+            t, val = f.get("target"), f.get("value")
+            if t == "ip_address":
+                ip_filter = val if isinstance(val, list) else ([val] if val else [])
+            elif t == "owner_team":
+                team_filter = val
+
+        db = SessionLocal()
+        try:
+            repo = JobRepository(db)
+            all_items = repo.get_failed_items_direct(
+                ["DHCP_FAILED"],
+                ip_addresses=ip_filter if ip_filter else None,
+                owner_team=team_filter,
+            )
+            if not all_items:
+                return {"messages": [AIMessage(content="IPAM AI Assistant입니다. 조치 대상 DHCP 실패 항목이 없습니다.")]}
+
+            # 가장 최근 잡의 아이템만 처리
+            latest_job_id = max(i.ip_reclaim_job_id for i in all_items)
+            items = [i for i in all_items if i.ip_reclaim_job_id == latest_job_id]
+            job = repo.get_job_by_id(latest_job_id)
+
+            if not items:
+                return {"messages": [AIMessage(content="IPAM AI Assistant입니다. 조치 대상 DHCP 실패 항목이 없습니다.")]}
+
+            rows = []
+            for item in items:
+                self.ntoss.cancel_task_item(job.sub_task_id, item.nw_id, item.ip_address)
+                repo.update_item_status_by_id(item.ip_reclaim_job_item_id, "DHCP_RECOVERY_DONE")
+                send_dhcp_action_completion(item.owner_email, item.ip_address, item.nw_id, job.sub_task_id)
+                rows.append(f"| {item.ip_address} | {job.sub_task_id} | 작업취소 완료 |")
+                logger.info(f"[DHCP_RECOVERY] 완료: {item.ip_address}")
+
+            lines = [
+                "IPAM AI Assistant입니다. DHCP 회수 실패 조치를 완료하였습니다.",
+                "",
+                f"| IP 주소 | 서브작업 ID | 조치 결과 |",
+                "|---|---|---|",
+            ] + rows + ["", "담당자에게 완료 메일이 발송되었습니다."]
+            return {"messages": [AIMessage(content="\n".join(lines))]}
+        finally:
+            db.close()
+
+    # ───────────────────────────────────────────────
+    # [NODE 8] device_recovery_handler (DEVICE_RECOVERY)
+    # ───────────────────────────────────────────────
+    def device_recovery_handler(self, state: AgentState):
+        """
+        장비 회수 실패 조치.
+        - query_plan filters 의 IP/팀 기준으로 DEVICE_FAILED 아이템 필터링 (미지정 시 전체)
+        - 신규 서브작업 생성 → IP 재할당 → 서브작업 완료 → cancel_task_item → REJECTED → 담당자 완료 메일
+        """
+        print("🚀 [NODE: device_recovery_handler]")
+        plan = state.get("query_plan", {})
+        filters = plan.get("filters", [])
+
+        ip_filter: List[str] = []
+        team_filter: Optional[str] = None
+        for f in filters:
+            t, val = f.get("target"), f.get("value")
+            if t == "ip_address":
+                ip_filter = val if isinstance(val, list) else ([val] if val else [])
+            elif t == "owner_team":
+                team_filter = val
+
+        db = SessionLocal()
+        try:
+            repo = JobRepository(db)
+            all_items = repo.get_failed_items_direct(
+                ["DEVICE_FAILED"],
+                ip_addresses=ip_filter if ip_filter else None,
+                owner_team=team_filter,
+            )
+            if not all_items:
+                return {"messages": [AIMessage(content="IPAM AI Assistant입니다. 조치 대상 장비 실패 항목이 없습니다.")]}
+
+            # 가장 최근 잡의 아이템만 처리
+            latest_job_id = max(i.ip_reclaim_job_id for i in all_items)
+            items = [i for i in all_items if i.ip_reclaim_job_id == latest_job_id]
+            job = repo.get_job_by_id(latest_job_id)
+
+            if not items:
+                return {"messages": [AIMessage(content="IPAM AI Assistant입니다. 조치 대상 장비 실패 항목이 없습니다.")]}
+
+            rows = []
+            for item in items:
+                new_sub = self.ntoss.create_sub_task("ADMIN_DONGHYUK", job.main_task_id)
+                new_sub_id = new_sub["sub_job_id"]
+                self.ntoss.allocate_ip(new_sub_id, item.ip_address)
+                self.ntoss.complete_sub_task(new_sub_id)
+                self.ntoss.cancel_task_item(job.sub_task_id, item.nw_id, item.ip_address)
+                repo.update_item_status_by_id(item.ip_reclaim_job_item_id, "DEVICE_RECOVERY_DONE")
+                send_device_action_completion(
+                    item.owner_email, item.ip_address, item.nw_id,
+                    job.sub_task_id, new_sub_id
+                )
+                rows.append(f"| {item.ip_address} | {job.sub_task_id} | {new_sub_id} | 재할당 완료 |")
+                logger.info(f"[DEVICE_RECOVERY] 완료: {item.ip_address} → 신규 서브작업: {new_sub_id}")
+
+            # 잔여 장애 없고 DEVICE_SUCCESS 또는 DEVICE_RECOVERY_DONE 존재 시 작업 완료 처리
+            remaining = repo.get_items_by_job_and_status(job.ip_reclaim_job_id, ["DHCP_FAILED", "DEVICE_FAILED"])
+            if not remaining:
+                device_success = repo.get_items_by_job_and_status(
+                    job.ip_reclaim_job_id, ["DEVICE_SUCCESS", "DEVICE_RECOVERY_DONE"]
+                )
+                if device_success:
+                    self.ntoss.complete_sub_task(job.sub_task_id)
+                    self.ntoss.complete_main_task(job.main_task_id)
+                    repo.update_job_status(job.ip_reclaim_job_id, "DONE")
+                    logger.info(f"[DEVICE_RECOVERY] 모든 장애 처리 완료 → job DONE: {job.ip_reclaim_job_id}")
+
+            lines = [
+                "IPAM AI Assistant입니다. 장비 회수 실패 조치를 완료하였습니다.",
+                "",
+                "| IP 주소 | 원본 서브작업 ID | 신규 서브작업 ID | 조치 결과 |",
+                "|---|---|---|---|",
+            ] + rows + ["", "담당자에게 완료 메일이 발송되었습니다."]
+            return {"messages": [AIMessage(content="\n".join(lines))]}
+        finally:
+            db.close()
+
+    # ───────────────────────────────────────────────
+    # [NODE 10] responder
     # ───────────────────────────────────────────────
     def responder(self, state: AgentState):
         """조회 데이터를 IPAM AI Assistant 페르소나로 포맷팅하여 응답"""
@@ -522,8 +726,14 @@ STATUS 특정 메인작업: {{"filters": [{{"target": "job_id", "value": "NTOSS-
 [상태 정의]
 - READY: 회수 대기 중
 - IN-PROGRESS: 담당자 확인 중 (메일 발송 완료)
-- DHCP_SUCCESS / DEVICE_SUCCESS: 단계별 회수 완료
-- DHCP_FAILED / DEVICE_FAILED: 장애 발생
+- OWNER_CONFIRMED: 담당자 확인 완료 (승인 회신)
+- DHCP_SUCCESS: DHCP 회수 완료
+- DHCP_FAILED: DHCP 회수 실패
+- DHCP_RECOVERY_DONE: DHCP 실패 후 조치 완료 (작업취소 처리)
+- DEVICE_SUCCESS: 장비 회수 완료
+- DEVICE_FAILED: 장비 회수 실패
+- DEVICE_RECOVERY_DONE: 장비 실패 후 조치 완료 (IP 재할당 처리)
+- REJECTED: 작업 제외 (사용자 요청)
 
 [보고 규칙]
 - "IPAM AI Assistant입니다."로 시작
@@ -533,9 +743,9 @@ STATUS 특정 메인작업: {{"filters": [{{"target": "job_id", "value": "NTOSS-
   |---|---|---|---|
   | ... | ... | ... | ... |
 - STATUS: 상태별 건수 요약 후 아래 형식으로 출력
-  | IP 주소 | 팀 | 상태 |
-  |---|---|---|
-  | ... | ... | ... |
+  | 날짜 | IP 주소 | 팀 | 상태 |
+  |---|---|---|---|
+  | ... | ... | ... | ... |
 - CSV 형식이나 일반 텍스트 목록은 사용하지 말 것
 - 표 외 설명은 표 앞뒤에 간결하게 작성
 """
@@ -543,7 +753,7 @@ STATUS 특정 메인작업: {{"filters": [{{"target": "job_id", "value": "NTOSS-
         return {"messages": [AIMessage(content=response.content)]}
 
     # ───────────────────────────────────────────────
-    # [NODE 8] chat_responder (CHAT / fallback)
+    # [NODE 11] chat_responder (CHAT / fallback)
     # ───────────────────────────────────────────────
     def chat_responder(self, state: AgentState):
         """일반 대화 응답"""
@@ -582,6 +792,8 @@ def build_reclaim_graph():
     workflow.add_node("rejecter", agent.reject_handler)
     workflow.add_node("approver", agent.approve_handler)
     workflow.add_node("executor", agent.task_executor)
+    workflow.add_node("dhcp_recovery", agent.dhcp_recovery_handler)
+    workflow.add_node("device_recovery", agent.device_recovery_handler)
 
     # 진입점: analyzer → dispatcher
     workflow.set_entry_point("analyzer")
@@ -592,13 +804,15 @@ def build_reclaim_graph():
         "dispatcher",
         lambda x: x["current_intent"],
         {
-            "REJECT":  "constructor",
-            "APPROVE": "constructor",
-            "START":   "constructor",
-            "STATUS":  "constructor",
-            "CONFIRM": "executor",
-            "CHAT":    "chat_responder",
-            "DONE":    END,
+            "REJECT":          "constructor",
+            "APPROVE":         "constructor",
+            "START":           "constructor",
+            "STATUS":          "constructor",
+            "DHCP_RECOVERY":   "constructor",
+            "DEVICE_RECOVERY": "constructor",
+            "CONFIRM":         "executor",
+            "CHAT":            "chat_responder",
+            "DONE":            END,
         },
     )
 
@@ -607,20 +821,24 @@ def build_reclaim_graph():
         "constructor",
         lambda x: x["current_intent"],
         {
-            "REJECT":  "rejecter",
-            "APPROVE": "approver",
-            "START":   "fetcher",
-            "STATUS":  "fetcher",
+            "REJECT":          "rejecter",
+            "APPROVE":         "approver",
+            "START":           "fetcher",
+            "STATUS":          "fetcher",
+            "DHCP_RECOVERY":   "dhcp_recovery",
+            "DEVICE_RECOVERY": "device_recovery",
         },
     )
 
     # 각 핸들러 완료 후 dispatcher로 복귀 (다음 인텐트 처리)
-    workflow.add_edge("fetcher",       "responder")
-    workflow.add_edge("responder",     "dispatcher")
-    workflow.add_edge("rejecter",      "dispatcher")
-    workflow.add_edge("approver",      "dispatcher")
-    workflow.add_edge("executor",      "dispatcher")
-    workflow.add_edge("chat_responder", END)
+    workflow.add_edge("fetcher",         "responder")
+    workflow.add_edge("responder",       "dispatcher")
+    workflow.add_edge("rejecter",        "dispatcher")
+    workflow.add_edge("approver",        "dispatcher")
+    workflow.add_edge("executor",        "dispatcher")
+    workflow.add_edge("dhcp_recovery",   "dispatcher")
+    workflow.add_edge("device_recovery", "dispatcher")
+    workflow.add_edge("chat_responder",  END)
 
     return workflow.compile()
 

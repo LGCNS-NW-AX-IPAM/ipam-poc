@@ -102,14 +102,14 @@ class NtossClient:
         }
 
     @log_ntoss_call
-    def no_action(self, task_id: str, nw_id: str, ip: str) -> dict:
-        """작업없음 처리 API - 해당 IP를 차후 회수 대상으로 관리"""
+    def cancel_task_item(self, task_id: str, nw_id: str, ip: str) -> dict:
+        """작업취소 처리 API - 해당 IP를 차후 회수 대상으로 재관리"""
         return {
             "status": "SUCCESS",
             "task_id": task_id,
             "nw_id": nw_id,
             "ip": ip,
-            "message": "작업없음 처리 완료"
+            "message": "작업취소 처리 완료"
         }
 
     @log_ntoss_call

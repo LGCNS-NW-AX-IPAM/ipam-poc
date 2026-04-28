@@ -29,13 +29,16 @@ def run_dhcp_reclaim():
         if not job:
             return {"message": "진행 중인 활성 작업이 없습니다."}
 
-        items = repo.get_items_by_job_and_status(job.ip_reclaim_job_id, ["IN-PROGRESS"])
+        items = repo.get_items_by_job_and_status(job.ip_reclaim_job_id, ["IN-PROGRESS", "OWNER_CONFIRMED"])
         if not items:
-            return {"message": "DHCP 회수 대상 아이템이 없습니다. (IN-PROGRESS 상태 없음)"}
+            return {"message": "DHCP 회수 대상 아이템이 없습니다. (IN-PROGRESS, OWNER_CONFIRMED 상태 없음)"}
 
         results = []
-        for item in items:
-            res = ntoss.reclaim_dhcp(job.sub_task_id, item.nw_id, item.ip_address)
+        for idx, item in enumerate(items):
+            if idx == 0:
+                res = {"status": "ERROR", "error_msg": "DHCP Server Connection Timeout (강제 실패)"}
+            else:
+                res = {"status": "SUCCESS"}
 
             if res["status"] == "SUCCESS":
                 repo.update_item_status_by_id(
@@ -47,17 +50,17 @@ def run_dhcp_reclaim():
                 logger.info(f"[DHCP] SUCCESS: {item.ip_address}")
             else:
                 error_msg = res.get("error_msg", "Unknown error")
-                # 작업없음 처리
-                ntoss.no_action(job.sub_task_id, item.nw_id, item.ip_address)
                 repo.update_item_status_by_id(
                     item.ip_reclaim_job_item_id,
                     "DHCP_FAILED",
                     dhcp_result="FAILED",
                     ntoss_result_message=error_msg
                 )
-                # 관리자 오류 메일
-                admin_email = os.getenv("GMAIL_USER", "admin@example.com")
-                send_error_notification(admin_email, "DHCP", item.ip_address, item.nw_id, error_msg)
+                # 담당자에게 오류 메일 발송 (조치 진행 여부 회신 요청)
+                send_error_notification(
+                    item.owner_email, "DHCP", item.ip_address, item.nw_id,
+                    error_msg, sub_task_id=job.sub_task_id
+                )
                 results.append({"ip": item.ip_address, "status": "DHCP_FAILED", "error": error_msg})
                 logger.warning(f"[DHCP] FAILED: {item.ip_address} | {error_msg}")
 
@@ -88,9 +91,12 @@ def run_device_reclaim():
         results = []
         has_failure = False
 
-        for item in items:
+        for idx, item in enumerate(items):
             device_id = item.device_id or "DEVICE-UNKNOWN"
-            res = ntoss.reclaim_device(job.sub_task_id, item.nw_id, device_id, item.ip_address)
+            if idx == 0:
+                res = {"status": "ERROR", "error_msg": "Device SNMP Response Error (강제 실패)"}
+            else:
+                res = {"status": "SUCCESS"}
 
             if res["status"] == "SUCCESS":
                 repo.update_item_status_by_id(
@@ -104,24 +110,17 @@ def run_device_reclaim():
                 has_failure = True
                 error_msg = res.get("error_msg", "Unknown error")
 
-                # 1) 신규 서브작업 생성 (원복용)
-                new_sub = ntoss.create_sub_task("ADMIN_DONGHYUK", job.main_task_id)
-                # 2) IP 할당(원복)
-                ntoss.allocate_ip(new_sub["sub_job_id"], item.ip_address)
-                # 3) 원복 서브작업 완료
-                ntoss.complete_sub_task(new_sub["sub_job_id"])
-                # 4) 기존 서브작업 작업없음 처리
-                ntoss.no_action(job.sub_task_id, item.nw_id, item.ip_address)
-
                 repo.update_item_status_by_id(
                     item.ip_reclaim_job_item_id,
                     "DEVICE_FAILED",
                     device_result="FAILED",
                     ntoss_result_message=error_msg
                 )
-                # 관리자 오류 메일
-                admin_email = os.getenv("GMAIL_USER", "admin@example.com")
-                send_error_notification(admin_email, "장비", item.ip_address, item.nw_id, error_msg)
+                # 담당자에게 오류 메일 발송 (조치 진행 여부 회신 요청)
+                send_error_notification(
+                    item.owner_email, "장비", item.ip_address, item.nw_id,
+                    error_msg, sub_task_id=job.sub_task_id
+                )
                 results.append({"ip": item.ip_address, "status": "DEVICE_FAILED", "error": error_msg})
                 logger.warning(f"[DEVICE] FAILED: {item.ip_address} | {error_msg}")
 
@@ -144,10 +143,11 @@ class MailReplyRequest(BaseModel):
 @router.post("/scheduler/mail-reply")
 def handle_mail_reply(req: MailReplyRequest):
     """
-    [Mock] 담당자 메일 회신 처리
-    - content(메일 본문)를 reclaim_agent 가 분석하여 APPROVE / REJECT 처리
-    - APPROVE: 기존 IN-PROGRESS 유지 (11:00 DHCP 회수 스케줄 포함)
-    - REJECT: 본문에 명시된 IP → REJECTED, 명시 없으면 전체 IN-PROGRESS 대상
+    [Mock] 담당자 메일 회신 처리 — reclaim_agent 가 인텐트를 분석하여 처리
+    - APPROVE / 부분 승인: IN-PROGRESS → OWNER_CONFIRMED (IP/팀 지정 가능)
+    - REJECT: 지정 대상 REJECTED 처리
+    - DHCP_RECOVERY: DHCP 실패 건 cancel_task_item 처리
+    - DEVICE_RECOVERY: 장비 실패 건 신규 서브작업 생성 + IP 재할당 처리
     """
     state = {
         "messages": [{"role": "user", "content": req.content}],
@@ -157,10 +157,9 @@ def handle_mail_reply(req: MailReplyRequest):
         "selected_ips": [],
         "max_per_team": 4,
         "excluded_filters": [],
-        "is_confirmed": True,   # 이미 확정된 상태 → REJECT 시 DB에 반영
+        "is_confirmed": True,
     }
     result = reclaim_graph.invoke(state)
-
     last_msg = result["messages"][-1]
     response_content = last_msg.content if hasattr(last_msg, "content") else last_msg.get("content")
     return {"message": response_content}
